@@ -12,7 +12,10 @@
 #>
 [CmdletBinding()]
 param()
-$ErrorActionPreference = 'Stop'
+# Continue (not Stop): native commands (node, cmd.exe, powershell) routinely write
+# to stderr, and under 'Stop' Windows PowerShell 5.1 turns that into a terminating
+# error. We gate on exit codes and explicit assertions instead.
+$ErrorActionPreference = 'Continue'
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $gen  = Join-Path $root 'gen-cli.js'
 $scratch = Join-Path ([IO.Path]::GetTempPath()) ('ps1bat_' + [guid]::NewGuid().ToString('N').Substring(0,8))
@@ -30,7 +33,7 @@ function New-Ps1([string]$name,[string]$content){
 }
 function Gen([string]$mode,[string]$ps1,[string]$bat,[string[]]$extra){
   $args = @('--mode',$mode,'--in',$ps1,'--out',$bat,'--no-pause') + $extra
-  & node $gen @args 2>$null
+  & node $gen @args 2>&1 | Out-Null
   if($LASTEXITCODE -ne 0){ throw "gen-cli failed ($LASTEXITCODE) for $bat" }
 }
 # Run a .bat with an isolated TEMP so cleanup assertions are reliable.
@@ -39,7 +42,7 @@ function Run-Bat([string]$bat,[string]$resultFile){
   New-Item -ItemType Directory -Path $tmp -Force | Out-Null
   $old = $env:TEMP; $oldt = $env:TMP; $oldr = $env:RESULT
   $env:TEMP = $tmp; $env:TMP = $tmp; $env:RESULT = $resultFile
-  try { & cmd.exe /c "`"$bat`"" | Out-Null; $code = $LASTEXITCODE }
+  try { & cmd.exe /c "`"$bat`"" 2>&1 | Out-Null; $code = $LASTEXITCODE }
   finally { $env:TEMP = $old; $env:TMP = $oldt; $env:RESULT = $oldr }
   $left = @(Get-ChildItem -Path $tmp -Filter *.ps1 -ErrorAction SilentlyContinue)
   return [pscustomobject]@{ Code = $code; TempDir = $tmp; LeftoverPs1 = $left.Count }

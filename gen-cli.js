@@ -53,4 +53,6 @@ if (mode === "hybrid") {
 }
 // UTF-8 without BOM
 fs.writeFileSync(outPath, Buffer.from(bat, "utf8"));
-process.stderr.write("wrote " + outPath + " (" + mode + ", hash " + (opts.hash ? hash.slice(0, 12) : "off") + ")\n");
+// info goes to stdout; stderr is reserved for real errors (so a PowerShell
+// caller with $ErrorActionPreference='Stop' does not treat this as a failure)
+process.stdout.write("wrote " + outPath + " (" + mode + ", hash " + (opts.hash ? hash.slice(0, 12) : "off") + ")\n");
