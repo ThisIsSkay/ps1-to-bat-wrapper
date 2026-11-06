@@ -60,6 +60,7 @@ Because the tool is one static file, it can be served free from this repo:
 - The launcher only writes, verifies, runs and deletes a copy of *your* script — it adds no behaviour of its own. Always review a script before running it elevated.
 - In **hybrid** mode the script runs from `%TEMP%`, so `$PSScriptRoot` points there, not the `.bat` folder. If a script needs its own location, pass it via the arguments field (e.g. `-OutputBase "%~dp0out"`).
 - The preview sandbox cannot save `.bat` files directly, so **Copy** is the reliable export. A "Save as .txt" button appears where the host supports it; rename to `.bat`.
+- **Curly quotes** (`“ ” ‘ ’`) are preserved byte-for-byte, but PowerShell itself treats them as string delimiters — a script that uses them as *literal characters* inside a string will hit a PowerShell parser error (not a wrapper bug). Use straight quotes in code; the tool warns if it sees curly ones.
 - Arguments you enter are inserted **verbatim** onto the PowerShell command line, so treat them as you would any command you'd run.
 - Base64 embedding still has a place for binary payloads or heavy non-ASCII; there a checksum stops being optional.
 

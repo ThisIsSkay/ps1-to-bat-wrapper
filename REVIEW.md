@@ -34,6 +34,7 @@ on a Windows box by the author.
 | X3 | Two error messages contained `( )`, which can terminate the enclosing `if` block. | Reworded all in-block messages to avoid `( ) & | < >`; added a paren-balance test per `if`-line. |
 | X4 | `$PSScriptRoot` is `%TEMP%` in hybrid mode (script runs from there). | The launcher exports `%BATDIR%` as `$env:LAUNCHER_DIR`; documented, and arguments like `-OutputBase "%~dp0out"` still work. |
 | X5 | Same-second temp/log name collision on concurrent runs. | Added a `%RANDOM%%RANDOM%` component (`RID`) to both the temp-script and log names. |
+| X6 | PowerShell treats curly quotes/apostrophes (`“ ” ‘ ’`) as string delimiters, so a script using them as literals fails to **parse** — surfaced while writing the UTF-8 test (the wrapper preserves the bytes; the emoji/astral case passes). | Not a wrapper bug: documented in README, warned in the tool, and the Windows suite proves curly-quote **bytes** are delivered to the temp `.ps1` intact. |
 
 ## What was deliberately **not** changed
 

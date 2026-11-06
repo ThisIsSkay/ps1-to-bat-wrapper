@@ -313,6 +313,7 @@ async function generate(){
   }
 
   if(SIG_RE.test(raw)) flags.push(flag("warn","!",`This script looks Authenticode-signed. Wrapping it will invalidate the signature — run signed scripts directly instead.`));
+  if(/[‘’“”]/.test(raw)) flags.push(flag("warn","!",`Curly quotes/apostrophes found. PowerShell treats these as string delimiters — used as literals inside a string they cause a parser error. The wrapper preserves the bytes; the fix is in the script (use straight quotes).`));
   if(!raw.trim()) flags.push(flag("warn","!",`No script yet — paste or drop a .ps1 file.`));
 
   lastBat=bat;

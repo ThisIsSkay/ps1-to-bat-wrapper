@@ -100,10 +100,27 @@ function Test-Unicode([string]$label,[string]$want,[string]$tag){
     Check $label ($got -eq $want) "got=[$got]"
   }catch{ Bad $label $_.Exception.Message }
 }
-Test-Unicode 'hybrid: UTF-8 BMP (accents/curly quotes/box/CJK) preserved' `
-  ("Caf" + [char]0x00E9 + " " + [char]0x201C + "ok" + [char]0x201D + " " + [char]0x2500 + " " + [char]0x4F60 + [char]0x597D) 'unibmp'
+Test-Unicode 'hybrid: UTF-8 BMP (accents/box-drawing/CJK) preserved' `
+  ("Caf" + [char]0x00E9 + " " + [char]0x2500 + " " + [char]0x4F60 + [char]0x597D + " ok") 'unibmp'
 Test-Unicode 'hybrid: UTF-8 astral (emoji) preserved' `
   ("emoji " + [char]::ConvertFromUtf32(0x1F600)) 'uniemo'
+
+# Curly quotes round-trip as BYTES through the launcher, but PowerShell itself
+# treats them as string delimiters, so a script using them as literals fails to
+# PARSE (that is a PowerShell property, not a wrapper bug). Prove the launcher
+# delivered the exact bytes to the temp .ps1 regardless of how PS parses them.
+try{
+  $ps1 = New-Ps1 'curly' ("`$s = 'has " + [char]0x201C + "curly" + [char]0x201D + " quotes'")
+  $bat = Join-Path $scratch 'curly.bat'; Gen hybrid $ps1 $bat @('--no-admin','--no-log','--no-del')
+  $r = Run-Bat $bat (Join-Path $scratch 'x.txt')
+  $tmp = @(Get-ChildItem -Path $r.TempDir -Filter *.ps1)
+  $found = $false
+  if($tmp.Count -ge 1){
+    $b = [IO.File]::ReadAllBytes($tmp[0].FullName)
+    for($i=0; $i -lt $b.Length-2; $i++){ if($b[$i] -eq 0xE2 -and $b[$i+1] -eq 0x80 -and $b[$i+2] -eq 0x9C){ $found = $true; break } }
+  }
+  Check 'hybrid: curly-quote bytes delivered to temp (PS parser quirk, not a wrapper bug)' $found "U+201C bytes (E2 80 9C) not found in temp .ps1"
+}catch{ Bad 'curly-quote bytes' $_.Exception.Message }
 
 # 6 — hybrid honors #requires + param() + arguments
 try{
