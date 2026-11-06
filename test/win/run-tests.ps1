@@ -42,10 +42,10 @@ function Run-Bat([string]$bat,[string]$resultFile){
   New-Item -ItemType Directory -Path $tmp -Force | Out-Null
   $old = $env:TEMP; $oldt = $env:TMP; $oldr = $env:RESULT
   $env:TEMP = $tmp; $env:TMP = $tmp; $env:RESULT = $resultFile
-  try { & cmd.exe /c "`"$bat`"" 2>&1 | Out-Null; $code = $LASTEXITCODE }
+  try { $out = & cmd.exe /c "`"$bat`"" 2>&1 | Out-String; $code = $LASTEXITCODE }
   finally { $env:TEMP = $old; $env:TMP = $oldt; $env:RESULT = $oldr }
   $left = @(Get-ChildItem -Path $tmp -Filter *.ps1 -ErrorAction SilentlyContinue)
-  return [pscustomobject]@{ Code = $code; TempDir = $tmp; LeftoverPs1 = $left.Count }
+  return [pscustomobject]@{ Code = $code; TempDir = $tmp; LeftoverPs1 = $left.Count; Output = $out }
 }
 
 Write-Host "PS1-to-BAT Windows runtime tests"
@@ -86,16 +86,24 @@ try{
   Check 'echo: throw yields non-zero exit' ($r.Code -ne 0) "code=$($r.Code)"
 }catch{ Bad 'echo throw' $_.Exception.Message }
 
-# 5 — hybrid preserves UTF-8 (accents, CJK, emoji, box-drawing)
-try{
-  $want = "Caf" + [char]0x00E9 + " " + [char]0x201C + "ok" + [char]0x201D + " " + [char]0x2500 + " " + [char]0x4F60 + [char]0x597D + " " + [char]::ConvertFromUtf32(0x1F600)
-  $ps1content = '$s = "' + ($want -replace '"','`"') + '"' + "`r`n" + '[IO.File]::WriteAllText($env:RESULT,$s,(New-Object Text.UTF8Encoding($false)))'
-  $ps1 = New-Ps1 'uni' $ps1content
-  $bat = Join-Path $scratch 'uni.bat'; Gen hybrid $ps1 $bat @('--no-admin','--no-log')
-  $res = Join-Path $scratch 'uni.txt'; $r = Run-Bat $bat $res
-  $got = [IO.File]::ReadAllText($res, [Text.Encoding]::UTF8)
-  Check 'hybrid: UTF-8 (accents/CJK/emoji/box) preserved end-to-end' (($r.Code -eq 0) -and ($got -eq $want)) "got=[$got]"
-}catch{ Bad 'hybrid unicode' $_.Exception.Message }
+# 5 — hybrid preserves UTF-8. BMP (accents/curly quotes/box/CJK) and astral
+#     (emoji) are checked separately so an astral-plane edge case is isolated.
+function Test-Unicode([string]$label,[string]$want,[string]$tag){
+  try{
+    $ps1content = '$s = "' + ($want -replace '"','`"') + '"' + "`r`n" + '[IO.File]::WriteAllText($env:RESULT,$s,(New-Object Text.UTF8Encoding($false)))'
+    $ps1 = New-Ps1 $tag $ps1content
+    $bat = Join-Path $scratch ($tag + '.bat'); Gen hybrid $ps1 $bat @('--no-admin','--no-log')
+    $res = Join-Path $scratch ($tag + '.txt'); if(Test-Path $res){Remove-Item $res}
+    $r = Run-Bat $bat $res
+    if($r.Code -ne 0 -or -not (Test-Path $res)){ Bad $label ("code=$($r.Code); output: " + ($r.Output -replace '\s+',' ')); return }
+    $got = [IO.File]::ReadAllText($res, [Text.Encoding]::UTF8)
+    Check $label ($got -eq $want) "got=[$got]"
+  }catch{ Bad $label $_.Exception.Message }
+}
+Test-Unicode 'hybrid: UTF-8 BMP (accents/curly quotes/box/CJK) preserved' `
+  ("Caf" + [char]0x00E9 + " " + [char]0x201C + "ok" + [char]0x201D + " " + [char]0x2500 + " " + [char]0x4F60 + [char]0x597D) 'unibmp'
+Test-Unicode 'hybrid: UTF-8 astral (emoji) preserved' `
+  ("emoji " + [char]::ConvertFromUtf32(0x1F600)) 'uniemo'
 
 # 6 — hybrid honors #requires + param() + arguments
 try{
