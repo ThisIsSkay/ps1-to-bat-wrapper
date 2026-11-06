@@ -162,19 +162,19 @@
       <div class="opts" role="group" aria-label="Launcher options">
         <div class="opt">
           <input type="checkbox" id="o_admin" checked>
-          <label for="o_admin"><span class="k">Require administrator</span><div class="d">Check for elevation and offer a UAC prompt if missing.</div></label>
+          <label for="o_admin"><span class="k">Require administrator</span><div class="d">Check for elevation and offer a UAC prompt; waits for the elevated run and returns its exit code.</div></label>
         </div>
         <div class="opt">
           <input type="checkbox" id="o_hash" checked>
-          <label for="o_hash"><span class="k">Verify SHA-256 before running</span><div class="d">Stop if the embedded script doesn't match (catches a damaged .bat).</div></label>
+          <label for="o_hash"><span class="k">Verify SHA-256 before running</span><div class="d">Stop if the embedded script doesn't match (catches accidental corruption; not a tamper-proof signature).</div></label>
         </div>
         <div class="opt">
           <input type="checkbox" id="o_del" checked>
-          <label for="o_del"><span class="k">Delete the temp script after it runs</span><div class="d">Always runs, even on error. Retries once.</div></label>
+          <label for="o_del"><span class="k">Delete the temp script after it runs</span><div class="d">Always runs, even on error. A delete failure is a warning only.</div></label>
         </div>
         <div class="opt">
           <input type="checkbox" id="o_log" checked>
-          <label for="o_log"><span class="k">Write a launcher log beside the .bat</span><div class="d">Records each step and the final exit code.</div></label>
+          <label for="o_log"><span class="k">Write a launcher log beside the .bat</span><div class="d">Falls back to %TEMP% if the folder is read-only; never blocks the run.</div></label>
         </div>
         <div class="opt">
           <input type="checkbox" id="o_pause" checked>
@@ -214,28 +214,42 @@
   </div>
 
   <details class="how">
-    <summary>How it works &amp; the two methods</summary>
+    <summary>How it works, the two methods &amp; the exit-code contract</summary>
     <div class="body">
       <h3>echo lines (ASCII)</h3>
-      <p>Each line of your script becomes one <code>&gt;&gt;"%TMPPS1%" echo(…</code> statement, so the script stays readable in the <code>.bat</code>. Because <code>cmd.exe</code> treats some characters specially, they're rewritten: <code>%</code> → <code>%%</code> everywhere, and <code>&amp; | &lt; &gt; ( ) ^</code> get a leading <code>^</code> outside double quotes. The tool re-parses each line the way <code>cmd</code> would and confirms it reconstructs the original. The catch: <code>echo</code> emits bytes in the console code page, so this method is reliable for <strong>ASCII only</strong> — curly quotes, accents and box-drawing characters can corrupt.</p>
+      <p>Each line becomes one <code>&gt;&gt;"%TMPPS1%" echo(…</code> statement. <code>%</code> → <code>%%</code> everywhere, and <code>&amp; | &lt; &gt; ( ) ^</code> get a leading <code>^</code> outside double quotes. The tool re-parses each line the way <code>cmd</code> would and confirms it reconstructs the original, and the launcher counts the written lines to catch a partial write. Reliable for <strong>ASCII</strong> only, and a single line that (after escaping) nears cmd's ~8191-char command limit is rejected — use hybrid mode for those. Line endings are normalised to CRLF, so this mode is functionally faithful but not byte-for-byte.</p>
       <h3>self-read hybrid (UTF-8)</h3>
-      <p>The script body is stored <strong>verbatim</strong> after a unique marker at the end of the file. The batch header (kept strictly ASCII) launches PowerShell, which reads <em>this same file</em> as UTF-8, extracts the body, optionally checks its SHA-256, writes it to <code>%TEMP%</code> as a UTF-8 <code>.ps1</code>, and runs it with <code>-File</code>. <code>cmd</code> never parses the body, so non-ASCII survives. Because it runs as a real file, <code>#requires</code>, <code>param()</code> blocks and launch arguments all work.</p>
-      <p><strong>Save the hybrid .bat as UTF-8 <u>without</u> BOM.</strong> A BOM at the top breaks <code>cmd</code>'s first line. Notepad's default "UTF-8" (not "UTF-8 with BOM") is correct; don't save as ANSI. The temp <code>.ps1</code> that PowerShell writes gets a BOM on purpose, so Windows PowerShell 5.1 reads it as UTF-8.</p>
-      <p><strong>One hybrid tradeoff:</strong> the script runs from <code>%TEMP%</code>, so <code>$PSScriptRoot</code> points there, not at the <code>.bat</code> folder. If your script needs its own location, pass it via the arguments field (e.g. <code>-OutputBase "%~dp0out"</code>).</p>
-      <h3>Both methods</h3>
-      <p>Run in 64-bit <code>powershell.exe</code> even from a 32-bit prompt. The preview sandbox blocks saving <code>.bat</code> directly, so <strong>Copy</strong> is the reliable path: paste into Notepad, save as <code>.bat</code> (set "Save as type" to All files, encoding UTF-8).</p>
+      <p>The body is stored <strong>byte-for-byte</strong> after a unique marker. The ASCII batch header launches PowerShell, which reads this file as UTF-8, extracts everything after the marker line (so leading/trailing blank lines are preserved), optionally checks its SHA-256, writes it to <code>%TEMP%</code> as a UTF-8 <code>.ps1</code>, and runs it with <code>-File</code>. <code>cmd</code> never parses the body, so non-ASCII survives and there is no per-line length limit. <code>#requires</code>, <code>param()</code> and arguments all work.</p>
+      <p><strong>Save the hybrid .bat as UTF-8 without BOM</strong> (Notepad's default "UTF-8"). A BOM breaks cmd's first line. The temp <code>.ps1</code> PowerShell writes gets a BOM on purpose, so Windows PowerShell 5.1 reads it as UTF-8. The script runs from <code>%TEMP%</code>, so <code>$PSScriptRoot</code> points there — the launcher also exports <code>%BATDIR%</code> as <code>$env:LAUNCHER_DIR</code> if your script needs its own location.</p>
+      <h3>exit codes</h3>
+      <table>
+        <tr><th>Code</th><th>Meaning</th></tr>
+        <tr><td><code>0</code></td><td>the script ran and returned 0</td></tr>
+        <tr><td>the script's own code</td><td>propagated verbatim when the script ran (e.g. <code>exit 42</code> → 42)</td></tr>
+        <tr><td><code>201</code></td><td>not elevated / UAC cancelled (script did not run)</td></tr>
+        <tr><td><code>202</code></td><td>bad output location / UNC path (script did not run)</td></tr>
+        <tr><td><code>203</code></td><td>64-bit Windows PowerShell not found (script did not run)</td></tr>
+        <tr><td><code>204</code></td><td>embedded script could not be written or failed SHA-256 (script did not run)</td></tr>
+      </table>
+      <p>Temp-cleanup failure is a warning only and never changes the exit code. A script that itself uses 201–204 is indistinguishable from the launcher's own — noted and accepted.</p>
+      <h3>what SHA-256 does and doesn't do</h3>
+      <p>It detects <strong>accidental corruption</strong> of the embedded script (bad copy, truncation, encoding damage). It is <strong>not</strong> a tamper-proof control: anyone who can edit the <code>.bat</code> can also change the embedded hash or turn the check off. For real authenticity, Authenticode-sign the script or the launcher.</p>
+      <h3>both methods</h3>
+      <p>Run in 64-bit <code>powershell.exe</code> even from a 32-bit prompt. The preview sandbox blocks saving <code>.bat</code> directly, so <strong>Copy</strong> is the reliable path: paste into Notepad, save as <code>.bat</code> (All files, UTF-8).</p>
     </div>
   </details>
 
-  <p class="foot">The launcher only writes, verifies, runs and deletes a copy of <em>your</em> script — nothing more. Review any script before running it elevated. Exit codes: 0 ok · 1 not admin · 2 bad folder · 3 PowerShell missing · 4 write/verify failed · 5 script error · 6 temp delete failed.</p>
+  <p class="foot">The launcher only writes, verifies, runs and deletes a copy of <em>your</em> script. Arguments you enter are inserted verbatim onto the PowerShell command line, so treat them as you would any command you'd run. Review any script before running it elevated.</p>
 </div>
 
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
+<script src="generator.js"></script>
 <script>
 "use strict";
 const $=s=>document.querySelector(s);
-const SPECIAL="^&|<>()";
+const G=window.PS1BAT;
+let MODE="echo";
 const SAMPLE=[
   "#requires -Version 5.1",
   "# Example script — replace with your own, or drop a .ps1 file",
@@ -243,297 +257,54 @@ const SAMPLE=[
   "Get-Date -Format o",
   "Get-Process | Select-Object -First 5 Name, Id"
 ].join("\r\n");
-let MODE="echo";
 
-/* ---- cmd escaping for a single echo line (no CR/LF in `line`) ---- */
-function escLine(line){
-  let out="",q=false;
-  for(const ch of line){
-    if(ch==="%"){out+="%%";continue;}
-    if(ch==='"'){q=!q;out+='"';continue;}
-    if(!q && SPECIAL.includes(ch)){out+="^"+ch;continue;}
-    out+=ch;
-  }
-  return out;
-}
-/* ---- reverse: emulate how cmd parses that echo text, to self-verify ---- */
-function decLine(s){
-  let out="",q=false;
-  for(let i=0;i<s.length;i++){
-    const ch=s[i];
-    if(ch==="%"){ if(s[i+1]==="%"){out+="%";i++;continue;} return null; }
-    if(ch==='"'){q=!q;out+='"';continue;}
-    if(!q && ch==="^"){ i++; if(i>=s.length) return null; out+=s[i]; continue; }
-    if(!q && "&|<>()".includes(ch)) return null;
-    out+=ch;
-  }
-  return out;
-}
-
-function splitLines(raw){
-  let t=raw;
-  const bom = t.charCodeAt(0)===0xFEFF;
-  if(bom) t=t.slice(1);
-  const crlf=/\r\n/.test(t), bareLf=/(^|[^\r])\n/.test(t);
-  let lines=t.split(/\r\n|\r|\n/);
-  if(lines.length && lines[lines.length-1]==="") lines.pop(); // no doubled trailing newline
-  return {lines, bom, mixed: crlf && bareLf, lf: bareLf && !crlf};
-}
-
-async function sha256Hex(bytesOrStr){
-  const data = typeof bytesOrStr==="string" ? new TextEncoder().encode(bytesOrStr) : bytesOrStr;
-  const buf=await crypto.subtle.digest("SHA-256", data);
+async function sha256Hex(str){
+  const buf=await crypto.subtle.digest("SHA-256", new TextEncoder().encode(str));
   return [...new Uint8Array(buf)].map(b=>b.toString(16).padStart(2,"0")).join("").toUpperCase();
 }
-const PH="__EXPECTED_SHA256__";
-
-/* pick a body marker not present in the script */
-function markerRest(bodyText){
-  let rest="PSBODY_7F3A2C91", n=0;
-  while(bodyText.indexOf("#"+rest)>=0){ n++; rest="PSBODY_7F3A2C91_"+n; }
-  return rest;
-}
-
-/* ================= ECHO MODE ================= */
-function buildEcho(lines, opts, hashPH){
-  const L=[]; const p=s=>L.push(s);
-  p("@echo off");
-  p("setlocal EnableExtensions DisableDelayedExpansion");
-  p('title '+opts.stem);
-  p("rem ===========================================================================");
-  p("rem  "+opts.stem+".bat  (echo mode)");
-  p("rem  Script written to %TEMP% as echo lines"+(opts.hash?", hash-checked,":",")+" run in 64-bit");
-  p("rem  PowerShell"+(opts.del?", then deleted.":"."));
-  p("rem ===========================================================================");
-  p('set "SELF=%~f0"');
-  p('set "BATDIR=%~dp0"');
-  p('if "%BATDIR:~-1%"=="\\" set "BATDIR=%BATDIR:~0,-1%"');
-  p('set "RC=0"');
-  if(opts.hash){ p('set "VERIFY_HASH=1"'); p('set "EXPECTED_SHA256='+hashPH+'"'); }
-  p("");
-  p(...psExe());
-  p(...stampAndTemp(opts));
-  if(opts.log) p(...logStart(opts));
-  p(...guards(opts));
-  if(opts.admin) p(...adminBlock(opts));
-  p("rem ---- Write the script with echo, then check it ---------------------------");
-  if(opts.log) p('call :log "Writing script to %TMPPS1%"');
-  p("call :write_ps1");
-  p('if errorlevel 1 ( '+errEcho(opts,"Could not write to %TEMP%.")+' & set "RC=4" & goto :cleanup )');
-  p('if not exist "%TMPPS1%" ( '+errEcho(opts,"Written script is missing - antivirus may have removed it.")+' & set "RC=4" & goto :cleanup )');
-  if(opts.hash){
-    p('if "%VERIFY_HASH%"=="1" (');
-    p('    "%PSEXE%" -NoProfile -NonInteractive -Command "try { $h=(Get-FileHash -LiteralPath $env:TMPPS1 -Algorithm SHA256 -ErrorAction Stop).Hash; if($h -ne $env:EXPECTED_SHA256){ exit 1 }; exit 0 } catch { exit 1 }"');
-    p('    if errorlevel 1 ( '+errEcho(opts,"SHA-256 mismatch. The .bat was edited or damaged.")+' & set "RC=4" & goto :cleanup )');
-    p('    '+okEcho(opts,"Hash verified."));
-    p(")");
-  }
-  p("");
-  p(...runAndTail(opts));
-  // :write_ps1 last
-  p("rem ===========================================================================");
-  p("rem  :write_ps1  -  one echo per line. %% = %, and ^ escapes & | < > ( ) ^");
-  p("rem  outside double quotes. Edit the script and regenerate, not these lines.");
-  p("rem ===========================================================================");
-  p(":write_ps1");
-  p('type nul > "%TMPPS1%" 2>nul || exit /b 1');
-  for(const ln of lines) p('>>"%TMPPS1%" echo('+escLine(ln));
-  p("exit /b 0");
-  return L.join("\r\n")+"\r\n";
-}
-
-/* ================= HYBRID MODE ================= */
-function buildHybrid(lines, opts, rest, hashPH){
-  const L=[]; const p=s=>L.push(s);
-  p("@echo off");
-  p("setlocal EnableExtensions DisableDelayedExpansion");
-  p("rem Keep everything before the body marker 7-bit ASCII.");
-  p('title '+opts.stem);
-  p("rem ===========================================================================");
-  p("rem  "+opts.stem+".bat  (self-read hybrid mode)");
-  p("rem  The PowerShell body is stored UNCHANGED after the marker at the end of");
-  p("rem  this file. cmd never parses it: PowerShell reads this file as UTF-8,");
-  p("rem  extracts the body,"+(opts.hash?" verifies its SHA-256,":"")+" writes it to %TEMP% as a UTF-8");
-  p("rem  .ps1, runs it with -File"+(opts.del?", then deletes it.":"."));
-  p("rem  >>> SAVE THIS FILE AS UTF-8 WITHOUT BOM <<<");
-  p("rem ===========================================================================");
-  p('set "SELF=%~f0"');
-  p('set "BATDIR=%~dp0"');
-  p('if "%BATDIR:~-1%"=="\\" set "BATDIR=%BATDIR:~0,-1%"');
-  p('set "RC=0"');
-  p("");
-  p(...psExe());
-  p(...stampAndTemp(opts));
-  if(opts.log) p(...logStart(opts));
-  p(...guards(opts));
-  if(opts.admin) p(...adminBlock(opts));
-  p("rem ---- Extract the body from this file and write it (PowerShell, UTF-8) ----");
-  if(opts.log) p('call :log "Extracting and writing the script body to %TMPPS1%"');
-  const seg=[
-    "$ErrorActionPreference='Stop';",
-    "$t=[IO.File]::ReadAllText($env:SELF,[Text.Encoding]::UTF8);",
-    "$m='#'+'"+rest+"';",
-    "$i=$t.IndexOf($m,[StringComparison]::Ordinal);",
-    "if($i -lt 0){[Console]::Error.WriteLine('ERROR: PowerShell body marker not found.');exit 4};",
-    "$b=$t.Substring($i+$m.Length).TrimStart([char]13,[char]10);"
-  ];
-  if(opts.hash){
-    seg.push("$hash=[BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash([Text.Encoding]::UTF8.GetBytes($b))).Replace('-','');");
-    seg.push("if($hash -ne '"+hashPH+"'){[Console]::Error.WriteLine('ERROR: Body SHA-256 mismatch - the file was edited or damaged.');exit 4};");
-  }
-  seg.push("[IO.File]::WriteAllText($env:TMPPS1,$b,[Text.UTF8Encoding]::new($true));");
-  seg.push("exit 0");
-  p('"%PSEXE%" -NoLogo -NoProfile -Command ^');
-  for(let k=0;k<seg.length;k++) p('  "'+seg[k]+'"'+(k<seg.length-1?" ^":""));
-  p('if errorlevel 1 ( '+errEcho(opts,"Could not extract or verify the script body (see message above).")+' & set "RC=4" & goto :cleanup )');
-  p('if not exist "%TMPPS1%" ( '+errEcho(opts,"Temp script is missing - antivirus may have removed it.")+' & set "RC=4" & goto :cleanup )');
-  if(opts.log) p('call :log "Body written and verified."');
-  p("");
-  p(...runAndTail(opts));
-  // body last, after all exits
-  p("rem ===========================================================================");
-  p("rem  PowerShell body below, stored verbatim as UTF-8. Edit the source and");
-  p("rem  regenerate"+(opts.hash?" (the SHA-256 above covers this body).":".")+" cmd never reaches these lines.");
-  p("rem ===========================================================================");
-  p("#"+rest);
-  p("");
-  for(const ln of lines) p(ln);
-  return L.join("\r\n")+"\r\n";
-}
-
-/* ---- shared fragments ---- */
-function psExe(){return[
-  "rem ---- 64-bit Windows PowerShell, even from a 32-bit prompt -----------------",
-  'set "PSEXE=%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"',
-  'if exist "%SystemRoot%\\Sysnative\\WindowsPowerShell\\v1.0\\powershell.exe" set "PSEXE=%SystemRoot%\\Sysnative\\WindowsPowerShell\\v1.0\\powershell.exe"',
-  ""
-];}
-function stampAndTemp(opts){const a=[
-  "rem ---- Timestamp and temp path ---------------------------------------------",
-  'set "STAMP="',
-  'if exist "%PSEXE%" for /f "delims=" %%T in (\'call "%PSEXE%" -NoProfile -NonInteractive -Command "Get-Date -Format yyyyMMdd_HHmmss"\') do set "STAMP=%%T"',
-  'if not defined STAMP set "STAMP=%RANDOM%%RANDOM%"',
-  'set "TMPPS1=%TEMP%\\'+opts.stem+'_%STAMP%_%RANDOM%.ps1"'
-];
-  if(opts.log) a.push('set "LOG=%BATDIR%\\'+opts.stem+'_%COMPUTERNAME%_%STAMP%.log"');
-  a.push(""); return a;
-}
-function logStart(opts){return[
-  "rem ---- Start the log (the .bat folder must be writable) --------------------",
-  '(echo [%DATE% %TIME%] Launcher started on %COMPUTERNAME% as %USERDOMAIN%\\%USERNAME%)> "%LOG%" 2>nul',
-  'if not exist "%LOG%" (',
-  '    echo ERROR: Cannot write to "%BATDIR%". Copy this .bat to a writable local folder.',
-  '    set "RC=2" & goto :end',
-  ")",
-  'call :log "Launcher: %SELF%"',
-  'call :log "Output folder: %BATDIR%"'
-];}
-function guards(opts){return[
-  'if "%BATDIR:~0,2%"=="\\\\" ( '+errEcho(opts,"Running from a UNC path. Copy the .bat to a local drive.")+' & set "RC=2" & goto :end )',
-  'if not exist "%PSEXE%" ( '+errEcho(opts,"Windows PowerShell not found.")+' & set "RC=3" & goto :end )',
-  ""
-];}
-function adminBlock(opts){return[
-  "rem ---- Admin check + UAC elevation -----------------------------------------",
-  '"%SystemRoot%\\System32\\fltmc.exe" >nul 2>&1',
-  "if errorlevel 1 (",
-  '    if /i "%~1"=="/elevated" ( '+errEcho(opts,"Still not elevated. Right-click the .bat and Run as administrator.")+' & set "RC=1" & goto :end )',
-  '    '+(opts.log?'call :log "Not elevated. Requesting UAC; continue in the new window."':'echo Requesting administrator rights; continue in the new window.'),
-  '    "%PSEXE%" -NoProfile -NonInteractive -Command "try { Start-Process -FilePath $env:ComSpec -ArgumentList (\'/c \' + [char]34 + [char]34 + $env:SELF + [char]34 + \' /elevated\' + [char]34) -Verb RunAs -ErrorAction Stop; exit 0 } catch { exit 1 }"',
-  '    if errorlevel 1 ( '+errEcho(opts,"UAC was cancelled. Run the .bat as administrator.")+' & set "RC=1" & goto :end )',
-  '    set "RC=0" & goto :end_quiet',
-  ")",
-  (opts.log?'call :log "Running elevated: yes"':"rem elevated"),
-  ""
-];}
-function runAndTail(opts){
-  const a=[];
-  a.push("rem ---- Run the script ------------------------------------------------------");
-  if(opts.log) a.push('call :log "Running the script."');
-  a.push('"%PSEXE%" -NoProfile -ExecutionPolicy Bypass -File "%TMPPS1%"'+(opts.args?" "+opts.args:""));
-  a.push('set "PSRC=%ERRORLEVEL%"');
-  a.push('if not "%PSRC%"=="0" ( '+errEcho(opts,"Script ended with exit code %PSRC%.")+' & set "RC=5" )');
-  if(opts.log) a.push('if "%PSRC%"=="0" call :log "Script finished (exit 0)."');
-  a.push("");
-  a.push(":cleanup");
-  if(opts.del){
-    a.push("rem ---- Always delete the temp script ---------------------------------------");
-    a.push('if exist "%TMPPS1%" del /f /q "%TMPPS1%" >nul 2>&1');
-    a.push('if exist "%TMPPS1%" ( "%SystemRoot%\\System32\\timeout.exe" /t 2 /nobreak >nul 2>&1 & del /f /q "%TMPPS1%" >nul 2>&1 )');
-    a.push('if exist "%TMPPS1%" ( '+errEcho(opts,"Could not delete %TMPPS1% - remove it manually.")+' & if "%RC%"=="0" set "RC=6" )');
-    if(opts.log) a.push('if not exist "%TMPPS1%" call :log "Temp script deleted."');
-  } else {
-    a.push('rem (Temp script kept at %TMPPS1% - "delete after run" was off.)');
-  }
-  a.push("");
-  a.push(":end");
-  if(opts.log) a.push('call :log "Finished with exit code %RC%."');
-  if(opts.pause){
-    a.push("echo.");
-    a.push('if "%RC%"=="0" (echo  DONE.) else (echo  FINISHED WITH ERRORS ^(code %RC%^).'+(opts.log?' See "%LOG%".':'')+')');
-    a.push("pause");
-  }
-  a.push(":end_quiet");
-  a.push("endlocal & exit /b %RC%");
-  a.push("");
-  if(opts.log){
-    a.push(":log");
-    a.push('echo [%DATE% %TIME%] %~1');
-    a.push('if defined LOG >>"%LOG%" 2>nul echo [%DATE% %TIME%] %~1');
-    a.push("exit /b 0");
-    a.push("");
-  }
-  return a;
-}
-function errEcho(opts,msg){ return opts.log?('call :log "ERROR: '+msg+'"'):('echo ERROR: '+msg); }
-function okEcho(opts,msg){ return opts.log?('call :log "'+msg+'"'):('echo '+msg); }
-
-/* ---- orchestration ---- */
-let lastBat="";
 function flag(cls,ic,msg){return `<div class="flag ${cls}"><span class="ic">${ic}</span><span>${msg}</span></div>`;}
+const SIG_RE=/#\s*SIG\s*#\s*Begin signature block/i;
 
+let lastBat="";
 async function generate(){
   const raw=$("#src").value;
-  const {lines,bom,mixed,lf}=splitLines(raw);
+  const sp=G.splitLines(raw);
   let stem=($("#o_name").value.trim()||"Run-Script").replace(/\.(bat|cmd)$/i,"").replace(/[^A-Za-z0-9._-]/g,"_")||"Run-Script";
-  const opts={
-    stem,
+  const opts={ stem,
     admin:$("#o_admin").checked, hash:$("#o_hash").checked, del:$("#o_del").checked,
-    log:$("#o_log").checked, pause:$("#o_pause").checked, args:$("#o_args").value.trim()
-  };
+    log:$("#o_log").checked, pause:$("#o_pause").checked, args:$("#o_args").value.trim() };
   $("#termname").textContent=stem+".bat";
 
   let bat, hash="";
   const flags=[];
 
   if(MODE==="echo"){
-    const recon=lines.join("\r\n")+"\r\n";
-    if(opts.hash) hash=await sha256Hex(recon);
-    bat=buildEcho(lines,opts,PH);
-    if(opts.hash) bat=bat.replace(PH,hash);
-    // verify round-trip
+    const body=G.echoBodyText(sp.lines);
+    if(opts.hash) hash=await sha256Hex(body);
+    bat=G.buildEcho(sp.lines,opts,G.PH);
+    if(opts.hash) bat=bat.replace(G.PH,hash);
+    // escaping round-trip
     let mismatch=-1;
-    for(let i=0;i<lines.length;i++){ if(decLine(escLine(lines[i]))!==lines[i]){mismatch=i;break;} }
+    for(let i=0;i<sp.lines.length;i++){ if(G.decLine(G.escLine(sp.lines[i]))!==sp.lines[i]){mismatch=i;break;} }
     if(mismatch>=0) flags.push(flag("bad","✕",`Escaping check failed on line ${mismatch+1}.`));
-    else flags.push(flag("ok","✓",`All ${lines.length} lines round-trip correctly through cmd parsing.`));
-    const nonAscii=[...raw].some(c=>c.charCodeAt(0)>127);
-    if(nonAscii) flags.push(flag("warn","!",`Non-ASCII found — echo mode is ASCII-only. Switch to <b>self-read hybrid</b> to keep these characters.`));
-    const longEcho=lines.reduce((m,l)=>Math.max(m,escLine(l).length),0);
-    if(longEcho>7900) flags.push(flag("warn","!",`A line nears cmd's ~8191-char limit after escaping.`));
+    else flags.push(flag("ok","✓",`All ${sp.lines.length} lines round-trip correctly through cmd parsing.`));
+    // length budget — now an error that steers to hybrid
+    const longest=G.maxEchoLen(sp.lines);
+    if(longest>G.ECHO_LINE_BUDGET) flags.push(flag("bad","✕",`A line is too long for echo mode (${longest} > ${G.ECHO_LINE_BUDGET} chars after escaping, near cmd's ~8191 limit). Use <b>self-read hybrid</b> — it has no per-line limit.`));
+    // non-ASCII
+    if([...raw].some(c=>c.charCodeAt(0)>127)) flags.push(flag("warn","!",`Non-ASCII found — echo mode is ASCII-only. Switch to <b>self-read hybrid</b> to keep these characters.`));
+    flags.push(flag("warn","!",`Line endings are normalised to CRLF (functionally faithful, not byte-for-byte).`));
   } else {
-    const bodyText=lines.join("\r\n")+"\r\n";
-    const rest=markerRest(bodyText);
-    if(opts.hash) hash=await sha256Hex(bodyText);
-    bat=buildHybrid(lines,opts,rest,PH);
-    if(opts.hash) bat=bat.replace(PH,hash);
-    // verify extraction + header ASCII
-    const mark="#"+rest;
-    const idx=bat.indexOf(mark);
-    const extracted=bat.slice(idx+mark.length).replace(/^[\r\n]+/,"");
-    flags.push( extracted===bodyText
-      ? flag("ok","✓",`Body stored verbatim (${lines.length} lines) and extracts cleanly — no escaping.`)
+    const body=sp.raw;                 // byte-for-byte
+    const rest=G.markerRest(body);
+    if(opts.hash) hash=await sha256Hex(body);
+    bat=G.buildHybrid(body,opts,rest,G.PH);
+    if(opts.hash) bat=bat.replace(G.PH,hash);
+    const extracted=G.extractHybridBody(bat,rest);
+    flags.push( extracted===body
+      ? flag("ok","✓",`Body stored byte-for-byte (${sp.lines.length} lines) and extracts cleanly — no escaping.`)
       : flag("bad","✕",`Body extraction check failed.`) );
-    const header=bat.slice(0,idx);
+    const header=bat.slice(0,bat.indexOf("#"+rest));
     const hdrBad=[...header].findIndex(c=>c.charCodeAt(0)>127);
     flags.push( hdrBad<0
       ? flag("ok","✓",`Launcher header is 7-bit ASCII — safe for cmd in any code page.`)
@@ -541,15 +312,17 @@ async function generate(){
     flags.push(flag("warn","!",`Save the .bat as <b>UTF-8 without BOM</b> (Notepad default "UTF-8", not "with BOM", not ANSI).`));
   }
 
+  if(SIG_RE.test(raw)) flags.push(flag("warn","!",`This script looks Authenticode-signed. Wrapping it will invalidate the signature — run signed scripts directly instead.`));
+  if(!raw.trim()) flags.push(flag("warn","!",`No script yet — paste or drop a .ps1 file.`));
+
   lastBat=bat;
   $("#out").textContent=bat;
   const bytes=new TextEncoder().encode(bat).length;
   $("#stats").innerHTML=
-    `<span>mode: <b>${MODE==="echo"?"echo":"hybrid"}</b></span>`+
-    `<span>script lines: <b>${lines.length}</b></span>`+
+    `<span>mode: <b>${MODE}</b></span>`+
+    `<span>script lines: <b>${sp.lines.length}</b></span>`+
     `<span>.bat size: <b>${bytes.toLocaleString()}</b> bytes</span>`+
     (opts.hash?`<span class="hash">SHA-256: <b>${hash.slice(0,16)}…</b></span>`:"");
-  if(!raw.trim()) flags.push(flag("warn","!",`No script yet — paste or drop a .ps1 file.`));
   $("#flags").innerHTML=flags.join("");
 }
 
@@ -561,7 +334,7 @@ function setMode(m){
   e.setAttribute("aria-checked",m==="echo"); h.setAttribute("aria-checked",m==="hybrid");
   $("#modenote").innerHTML = m==="echo"
     ? `Each line becomes an <code>echo</code> statement. Readable and hash-verified, but <b>ASCII only</b>.`
-    : `Body stored verbatim; PowerShell reads this file as UTF-8 so <b>non-ASCII survives</b>. Save the <code>.bat</code> as UTF-8 without BOM.`;
+    : `Body stored byte-for-byte; PowerShell reads this file as UTF-8 so <b>non-ASCII survives</b>. Save the <code>.bat</code> as UTF-8 without BOM.`;
   generate();
 }
 $("#m_echo").addEventListener("click",()=>setMode("echo"));

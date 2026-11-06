@@ -1,0 +1,33 @@
+name: tests
+
+on:
+  push:
+    branches: [main, harden-launcher]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  pure:
+    name: Pure generator tests (Node)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Run pure-logic tests
+        run: node test/pure.test.js
+
+  windows:
+    name: Windows runtime tests
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Pure-logic tests
+        run: node test/pure.test.js
+      - name: Generate-and-execute launchers (real cmd + Windows PowerShell)
+        shell: powershell
+        run: powershell -ExecutionPolicy Bypass -File test\win\run-tests.ps1
